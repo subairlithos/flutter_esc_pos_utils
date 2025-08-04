@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:typed_data' show Uint8List;
+import 'dart:typed_data' show Uint8List, BytesBuilder;
 
 import 'package:flutter_esc_pos_utils/flutter_esc_pos_utils.dart';
 import 'package:gbk_codec/gbk_codec.dart';
@@ -597,7 +597,8 @@ class Generator {
   ///
   /// [image] is an instance of class from [Image library](https://pub.dev/packages/image)
   List<int> image(Image imgSrc,
-      {PosAlign align = PosAlign.center, bool isDoubleDensity = true}) {
+      {PosAlign align = PosAlign.center, bool isDoubleDensity = true})
+  {
     List<int> bytes = [];
     // Image alignment
     bytes += setStyles(const PosStyles().copyWith(align: align));
@@ -613,9 +614,11 @@ class Generator {
 
       image =
           copyResize(imgSrc, width: size, interpolation: Interpolation.linear);
-    } else {
+    }
+    else {
       image = Image.from(imgSrc); // make a copy
     }
+    print("1--${DateTime.now()}");
 
     bool highDensityHorizontal = isDoubleDensity;
     bool highDensityVertical = isDoubleDensity;
@@ -623,6 +626,9 @@ class Generator {
     invert(image);
     flipHorizontal(image);
     final Image imageRotated = copyRotate(image, angle: 270);
+
+
+    print("2--${DateTime.now()}");
 
     int lineHeight = highDensityVertical ? 3 : 1;
     final List<List<int>> blobs = _toColumnFormat(imageRotated, lineHeight * 8);
@@ -635,6 +641,8 @@ class Generator {
       blobs[blobInd] = _packBitsIntoBytes(blobs[blobInd]);
     }
 
+    print("3--${DateTime.now()}");
+
     final int heightPx = imageRotated.height;
     int densityByte =
         (highDensityHorizontal ? 1 : 0) + (highDensityVertical ? 32 : 0);
@@ -643,6 +651,7 @@ class Generator {
     header.add(densityByte);
     header.addAll(_intLowHigh(heightPx, 2));
 
+    print("4--${DateTime.now()}");
     // Adjust line spacing (for 16-unit line feeds): ESC 3 0x10 (HEX: 0x1b 0x33 0x10)
     bytes += [27, 51, 0];
     for (int i = 0; i < blobs.length; ++i) {
@@ -650,10 +659,153 @@ class Generator {
         ..addAll(blobs[i])
         ..addAll('\n'.codeUnits);
     }
+    print("5--${DateTime.now()}");
     // Reset line spacing: ESC 2 (HEX: 0x1b 0x32)
     bytes += [27, 50];
     return bytes;
   }
+
+
+  List<int> quickImage1(Image imgSrc,
+      {PosAlign align = PosAlign.center, bool isDoubleDensity = true})
+  {
+    final bytesBuilder = BytesBuilder(copy: false);
+
+    // Image alignment
+    bytesBuilder.add(setStyles(const PosStyles().copyWith(align: align)));
+
+    Image image;
+    if (!isDoubleDensity) {
+      int size = 558 ~/ 2;
+      if (_paperSize == PaperSize.mm58) {
+        size = 375 ~/ 2;
+      } else if (_paperSize == PaperSize.mm72) {
+        size = 503 ~/ 2;
+      }
+      image = copyResize(imgSrc, width: size, interpolation: Interpolation.linear);
+    } else {
+      image = Image.from(imgSrc);
+    }
+
+    invert(image);
+    flipHorizontal(image);
+    final Image imageRotated = copyRotate(image, angle: 270);
+
+    final int lineHeight = isDoubleDensity ? 3 : 1;
+    final List<List<int>> blobs = _toColumnFormat(imageRotated, lineHeight * 8);
+
+    for (int blobInd = 0; blobInd < blobs.length; blobInd++) {
+      blobs[blobInd] = _packBitsIntoBytes(blobs[blobInd]);
+    }
+
+    final int heightPx = imageRotated.height;
+    int densityByte =
+        (isDoubleDensity ? 1 : 0) + (isDoubleDensity ? 32 : 0);
+
+    final List<int> header = List.from(cBitImg.codeUnits)
+      ..add(densityByte)
+      ..addAll(_intLowHigh(heightPx, 2));
+
+    // Adjust line spacing
+    bytesBuilder.add([27, 51, 0]);
+
+    for (final blob in blobs) {
+      bytesBuilder.add(header);
+      bytesBuilder.add(blob);
+      bytesBuilder.add([10]); // '\n'
+    }
+
+    // Reset line spacing
+    bytesBuilder.add([27, 50]);
+
+    return bytesBuilder.toBytes();
+  }
+
+
+  /// Prints an image in ESC/POS using Raster Bit Image (GS v 0) mode.
+  /// Much faster than line-by-line printing.
+  List<int> quickImage2(
+      Image srcImage, {
+        PosAlign align = PosAlign.center,
+        bool isDoubleDensity = true,
+      }) {
+    final bytesBuilder = BytesBuilder(copy: false);
+
+    // 1️⃣ Set alignment
+    bytesBuilder.add(setStyles(const PosStyles().copyWith(align: align)));
+
+    // 2️⃣ Resize image to printer width
+    int targetWidth = 558; // mm80
+    if (_paperSize == PaperSize.mm58) targetWidth = 375;
+    if (_paperSize == PaperSize.mm72) targetWidth = 503;
+
+    if (!isDoubleDensity) {
+      targetWidth ~/= 2;
+    }
+
+    Image image = copyResize(srcImage,
+        width: targetWidth, interpolation: Interpolation.linear);
+
+    // 3️⃣ Combine transformations:
+    // Rotate 270° → Invert → Flip horizontal
+    image = copyRotate(image, angle: 270);
+    image = flipHorizontal(image);
+    image = invert(image);
+
+    // 4️⃣ Convert image to 1-bit black & white
+    final bw = Image(width: image.width, height: image.height);
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        final luma = getLuminance(image.getPixel(x, y));
+        bw.setPixel(x, y, luma < 128 ? ColorRgb8(0, 0, 0): ColorRgb8(255, 255, 255));
+      }
+    }
+
+    // 5️⃣ Compute raster command header
+    final widthBytes = (bw.width + 7) ~/ 8;
+    final height = bw.height;
+    final xL = widthBytes & 0xFF;
+    final xH = (widthBytes >> 8) & 0xFF;
+    final yL = height & 0xFF;
+    final yH = (height >> 8) & 0xFF;
+
+    // GS v 0: 1D 76 30 m xL xH yL yH
+    bytesBuilder.add([0x1D, 0x76, 0x30, 0x00, xL, xH, yL, yH]);
+
+    // 6️⃣ Convert image to packed 1-bit row-by-row
+    final packed = Uint8List(widthBytes * height);
+    int offset = 0;
+
+    for (int y = 0; y < height; y++) {
+      int byte = 0;
+      int bitCount = 0;
+      for (int x = 0; x < bw.width; x++) {
+        final p = bw.getPixel(x, y);
+        final isBlack = (p.r * 0.299 + p.g * 0.587 + p.b * 0.114) < 128;
+        byte = (byte << 1) | (isBlack ? 1 : 0);
+        bitCount++;
+
+        if (bitCount == 8) {
+          packed[offset++] = byte;
+          byte = 0;
+          bitCount = 0;
+        }
+      }
+      if (bitCount > 0) {
+        byte <<= (8 - bitCount);
+        packed[offset++] = byte;
+      }
+    }
+
+    // 7️⃣ Add image bytes
+    bytesBuilder.add(packed);
+
+    // 8️⃣ Feed & reset line spacing
+    bytesBuilder.add([0x1B, 0x32]); // ESC 2
+
+    return bytesBuilder.toBytes();
+  }
+
 
   /// Print an image using (GS v 0) obsolete command
   ///
